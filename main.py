@@ -2,84 +2,76 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import requests
 import os
-import json
+import numpy as np
 from typing import List
 
 app = FastAPI()
 
-# Pydantic model for the incoming payload
 class RetrievalPayload(BaseModel):
     query_id: str
     query: str
     candidates: List[str]
 
-@app.post("/")
-async def process_retrieval(payload: RetrievalPayload):
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable not set.")
-
-    # Strict adherence to AI Pipe proxy architecture
-    url = "https://aipipe.org/geminiv1beta/models/gemini-2.5-flash:generateContent"
+def get_embeddings(texts: List[str], api_key: str) -> List[List[float]]:
+    # Standard OpenAI Embeddings endpoint
+    url = "https://api.openai.com/v1/embeddings"
     
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}"
     }
-
-    # Format the candidates into a numbered list for the prompt
-    candidates_text = ""
-    for idx, text in enumerate(payload.candidates):
-        candidates_text += f"Index {idx}: {text}\n"
-
-    # Hyper-strict prompt to force semantic evaluation and return EXACT integer indices
-    prompt = f"""
-    You are an expert semantic search ranking algorithm. 
-    You are given a user query and a list of candidate passages. 
-    Your task is to identify the EXACT 3 candidate passages that are most semantically relevant to the query.
-
-    User Query: "{payload.query}"
-
-    Candidate Passages:
-    {candidates_text}
-
-    CRITICAL RULES:
-    1. You MUST output ONLY valid JSON.
-    2. The JSON must exactly match this structure: {{"ranking": [index1, index2, index3]}}
-    3. The values in the ranking array must be the exact integer indices (from the list above) of the 3 most relevant passages.
-    4. Do not include any conversational text, explanations, or Markdown backticks. Output strictly the JSON object.
-    """
-
-    data = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": prompt}
-                ]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.0, # Zero for deterministic extraction
-            "response_mime_type": "application/json"
-        }
+    
+    payload = {
+        "input": texts,
+        "model": "text-embedding-3-small"
     }
+    
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code != 200:
+        raise HTTPException(status_code=500, detail=f"Embedding API error: {response.text}")
+        
+    data = response.json()["data"]
+    # Ensure the returned embeddings are in the exact order requested
+    sorted_data = sorted(data, key=lambda x: x["index"])
+    return [item["embedding"] for item in sorted_data]
+
+def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+    # Convert lists to NumPy arrays for mathematical operations
+    v1 = np.array(vec1)
+    v2 = np.array(vec2)
+    # Cosine similarity formula: dot product / (norm(v1) * norm(v2))
+    return float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
+
+@app.post("/")
+async def process_retrieval(payload: RetrievalPayload):
+    # Fetch the OpenAI API key (ensure you add this to Render!)
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY environment variable not set.")
 
     try:
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
+        # Optimization: Combine query and all candidates into a single batch request
+        all_texts = [payload.query] + payload.candidates
+        all_embeddings = get_embeddings(all_texts, api_key)
         
-        response_data = response.json()
-        raw_text = response_data["candidates"][0]["content"]["parts"][0]["text"]
+        # The first embedding is the query, the rest are candidates
+        query_embedding = all_embeddings[0]
+        candidate_embeddings = all_embeddings[1:]
         
-        # Autograder Survival: Strip Markdown backticks completely
-        cleaned_text = raw_text.replace("```json", "").replace("```", "").strip()
+        # Calculate cosine similarity between the query and each candidate
+        similarities = []
+        for idx, cand_emb in enumerate(candidate_embeddings):
+            sim_score = cosine_similarity(query_embedding, cand_emb)
+            similarities.append((idx, sim_score))
+            
+        # Sort by similarity score in descending order (highest score first)
+        similarities.sort(key=lambda x: x[1], reverse=True)
         
-        # Parse the JSON string into a Python dictionary to return as proper JSON from FastAPI
-        parsed_json = json.loads(cleaned_text)
+        # Extract the original indices of the top 3 highest scoring candidates
+        top_3_indices = [sim[0] for sim in similarities[:3]]
         
-        return parsed_json
+        # Return strict expected JSON structure
+        return {"ranking": top_3_indices}
 
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"API Request failed: {str(e)}")
-    except (KeyError, IndexError, json.JSONDecodeError) as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse model response: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
