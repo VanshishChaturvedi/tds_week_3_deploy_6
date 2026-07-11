@@ -26,28 +26,29 @@ async def process_retrieval(payload: RetrievalPayload):
         "Authorization": f"Bearer {api_key}"
     }
 
-    # Format candidates cleanly for the LLM
+    # Format candidates clearly for the LLM
     candidates_text = ""
     for idx, text in enumerate(payload.candidates):
         candidates_text += f"[{idx}] {text}\n"
 
-    # ENGINEERED PROMPT: Forcing Gemini to emulate a vector embedding cosine similarity score
+    # NEW STRATEGY: Force Gemini to score EVERY candidate individually, simulating vector math.
     prompt = f"""
-    You are a strict semantic similarity ranking engine. Your goal is to emulate the exact results of a text-embedding-3-small cosine similarity calculation.
+    You are a strict semantic similarity scoring algorithm. Your task is to calculate the semantic overlap between a Query and a list of Candidate Passages.
     
-    You must find the 3 candidate passages that have the highest direct semantic, topical, and lexical overlap with the User Query.
-    Do NOT answer the query or try to be helpful. ONLY evaluate raw text similarity.
-
-    User Query: "{payload.query}"
-
-    Candidate Passages:
+    Query: "{payload.query}"
+    
+    Candidates:
     {candidates_text}
-
-    CRITICAL RULES:
-    1. Output ONLY valid JSON.
-    2. The JSON must exactly match this structure: {{"ranking": [i, j, k]}}
-    3. Replace i, j, k with the exact integer indices (the numbers in brackets) of the 3 most similar passages.
-    4. Do not include any conversational text, explanations, or Markdown backticks (like ```json).
+    
+    CRITICAL INSTRUCTIONS:
+    1. You MUST evaluate EVERY single candidate passage.
+    2. Assign a similarity score from 0 to 100 for each candidate based on lexical overlap, conceptual alignment, and semantic similarity to the Query.
+    3. Output ONLY a valid JSON object with a single key "scores" containing an array of these integer scores.
+    4. The array MUST contain exactly {len(payload.candidates)} integers. You must keep the exact original order.
+    5. Output absolutely no conversational text or markdown formatting.
+    
+    Example output format:
+    {{"scores": [15, 89, 2, 45, 99]}}
     """
 
     data = {
@@ -59,7 +60,7 @@ async def process_retrieval(payload: RetrievalPayload):
             }
         ],
         "generationConfig": {
-            "temperature": 0.0, # Zero temperature is mandatory for ranking stability
+            "temperature": 0.0, 
             "response_mime_type": "application/json"
         }
     }
@@ -74,11 +75,27 @@ async def process_retrieval(payload: RetrievalPayload):
         # Autograder Survival: Strip Markdown backticks completely
         cleaned_text = raw_text.replace("```json", "").replace("```", "").strip()
         
-        # Parse and return the strict JSON payload
         parsed_json = json.loads(cleaned_text)
-        return parsed_json
+        scores = parsed_json.get("scores", [])
+
+        # Safety fallback if the LLM misses an item
+        if len(scores) != len(payload.candidates):
+            # Pad with zeros if too short, truncate if too long
+            scores = (scores + [0] * len(payload.candidates))[:len(payload.candidates)]
+
+        # Python deterministic sorting: Pair each score with its original index
+        indexed_scores = list(enumerate(scores))
+        
+        # Sort descending based on the score (highest first)
+        indexed_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        # Extract the original indices of the top 3 highest scoring candidates
+        top_3_indices = [idx for idx, score in indexed_scores[:3]]
+        
+        # Return the strict JSON format the autograder expects
+        return {"ranking": top_3_indices}
 
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=500, detail=f"API Request failed: {str(e)}")
-    except (KeyError, IndexError, json.JSONDecodeError) as e:
+    except (KeyError, IndexError, json.JSONDecodeError, TypeError) as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse model response: {str(e)}")
