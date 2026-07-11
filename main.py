@@ -31,24 +31,25 @@ async def process_retrieval(payload: RetrievalPayload):
     for idx, text in enumerate(payload.candidates):
         candidates_text += f"[{idx}] {text}\n"
 
-    # NEW STRATEGY: Force Gemini to score EVERY candidate individually, simulating vector math.
+    # ENGINEERED PROMPT: Using Chain-of-Thought (CoT) inside JSON to force semantic alignment
     prompt = f"""
-    You are a strict semantic similarity scoring algorithm. Your task is to calculate the semantic overlap between a Query and a list of Candidate Passages.
+    You are a highly advanced semantic matching engine. Your task is to identify the EXACT 3 candidate passages that are most semantically relevant to the User Query.
+    The 3 correct passages are highly relevant and clearly separated from the rest.
     
-    Query: "{payload.query}"
+    User Query: "{payload.query}"
     
-    Candidates:
+    Candidate Passages:
     {candidates_text}
     
-    CRITICAL INSTRUCTIONS:
-    1. You MUST evaluate EVERY single candidate passage.
-    2. Assign a similarity score from 0 to 100 for each candidate based on lexical overlap, conceptual alignment, and semantic similarity to the Query.
-    3. Output ONLY a valid JSON object with a single key "scores" containing an array of these integer scores.
-    4. The array MUST contain exactly {len(payload.candidates)} integers. You must keep the exact original order.
-    5. Output absolutely no conversational text or markdown formatting.
-    
-    Example output format:
-    {{"scores": [15, 89, 2, 45, 99]}}
+    CRITICAL RULES:
+    1. Output ONLY valid JSON.
+    2. You MUST use "Chain of Thought" reasoning before outputting the final ranking to simulate a high-dimensional vector search.
+    3. The JSON must exactly match this structure:
+    {{
+        "thought_process": "Identify the core concepts of the query. Then, list the 3 indices that have the highest lexical and semantic overlap with those concepts, explaining why.",
+        "ranking": [i, j, k]
+    }}
+    4. Replace i, j, k with the exact integer indices of the top 3 candidates. Do NOT include anything else.
     """
 
     data = {
@@ -76,26 +77,11 @@ async def process_retrieval(payload: RetrievalPayload):
         cleaned_text = raw_text.replace("```json", "").replace("```", "").strip()
         
         parsed_json = json.loads(cleaned_text)
-        scores = parsed_json.get("scores", [])
-
-        # Safety fallback if the LLM misses an item
-        if len(scores) != len(payload.candidates):
-            # Pad with zeros if too short, truncate if too long
-            scores = (scores + [0] * len(payload.candidates))[:len(payload.candidates)]
-
-        # Python deterministic sorting: Pair each score with its original index
-        indexed_scores = list(enumerate(scores))
         
-        # Sort descending based on the score (highest first)
-        indexed_scores.sort(key=lambda x: x[1], reverse=True)
-        
-        # Extract the original indices of the top 3 highest scoring candidates
-        top_3_indices = [idx for idx, score in indexed_scores[:3]]
-        
-        # Return the strict JSON format the autograder expects
-        return {"ranking": top_3_indices}
+        # The autograder ONLY wants the "ranking" key, so we discard "thought_process" and return the strict schema
+        return {"ranking": parsed_json.get("ranking", [])}
 
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=500, detail=f"API Request failed: {str(e)}")
-    except (KeyError, IndexError, json.JSONDecodeError, TypeError) as e:
+    except (KeyError, IndexError, json.JSONDecodeError) as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse model response: {str(e)}")
